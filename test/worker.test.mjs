@@ -43,12 +43,54 @@ test('health route is the only ordinary HTTP route', async () => {
 	}
 });
 
-test('wrong Host and path fail before WebSocket creation', async () => {
+test('HTTP and non-443 entry ports fail closed', async () => {
+	for (const candidate of [
+		new Request(`http://${HOST}/healthz`, {
+			headers: { host: HOST },
+		}),
+		new Request(`https://${HOST}:8443/healthz`, {
+			headers: { host: `${HOST}:8443` },
+		}),
+		new Request(`https://${HOST}/healthz`, {
+			headers: { host: `${HOST}:80` },
+		}),
+	]) {
+		assert.equal((await handleRequest(candidate, ENV, () => {})).status, 404);
+	}
+	assert.equal(
+		(
+			await handleRequest(
+				new Request(`https://${HOST}:443/healthz`, {
+					headers: { host: `${HOST}:443` },
+				}),
+				ENV,
+				() => {}
+			)
+		).status,
+		204
+	);
+});
+
+test('wrong Host, URL authority, and path fail before WebSocket creation', async () => {
 	assert.equal(
 		(
 			await handleRequest(
 				new Request(`https://${HOST}${TEST_PATH}`, {
 					headers: { host: 'wrong.pages.dev', upgrade: 'websocket' },
+				}),
+				ENV,
+				() => {
+					throw new Error('connect must not run');
+				}
+			)
+		).status,
+		404
+	);
+	assert.equal(
+		(
+			await handleRequest(
+				new Request(`https://wrong.pages.dev${TEST_PATH}`, {
+					headers: { host: HOST, upgrade: 'websocket' },
 				}),
 				ENV,
 				() => {

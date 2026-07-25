@@ -1,13 +1,13 @@
 import { parseVlessHeader } from './vless.js';
 
 const WS_OPEN = 1;
-const WS_CLOSING = 2;
 const MAX_EARLY_DATA_BYTES = 8192;
+export const MAX_PENDING_OUTBOUND_BYTES = 64 * 1024;
 
-function closeWebSocket(socket) {
+function closeWebSocket(socket, code = 1000) {
 	try {
-		if (socket.readyState === WS_OPEN || socket.readyState === WS_CLOSING) {
-			socket.close(1000, '');
+		if (socket.readyState === WS_OPEN) {
+			socket.close(code, '');
 		}
 	} catch {
 		// Closure is best-effort and never logged with connection metadata.
@@ -20,6 +20,20 @@ function closeTcp(socket) {
 	} catch {
 		// Closure is best-effort.
 	}
+}
+
+function clearPending(state) {
+	state.pendingChunks.length = 0;
+	state.pendingBytes = 0;
+}
+
+function terminate(state, webSocket, code) {
+	if (state.closed) return;
+	state.closed = true;
+	clearPending(state);
+	closeTcp(state.openingSocket);
+	closeTcp(state.socket);
+	closeWebSocket(webSocket, code);
 }
 
 function toBytes(value) {
@@ -47,9 +61,19 @@ function decodeEarlyData(header) {
 	}
 }
 
-function timeoutAfter(milliseconds) {
-	return new Promise((_, reject) => {
-		setTimeout(() => reject(new Error('timeout')), milliseconds);
+function waitForOpen(socket, milliseconds) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error('timeout')), milliseconds);
+		Promise.resolve(socket.opened).then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error) => {
+				clearTimeout(timer);
+				reject(error);
+			}
+		);
 	});
 }
 
@@ -63,16 +87,22 @@ async function writeToSocket(socket, bytes) {
 	}
 }
 
-async function openSocket(connect, endpoint, initialData, timeout) {
+async function openSocket(connect, endpoint, timeout, state) {
 	let socket;
 	try {
 		socket = connect(endpoint);
-		await Promise.race([socket.opened, timeoutAfter(timeout)]);
-		await writeToSocket(socket, initialData);
+		state.openingSocket = socket;
+		await waitForOpen(socket, timeout);
+		if (state.closed) {
+			closeTcp(socket);
+			return null;
+		}
 		return socket;
 	} catch {
 		closeTcp(socket);
 		return null;
+	} finally {
+		if (state.openingSocket === socket) state.openingSocket = null;
 	}
 }
 
@@ -81,6 +111,7 @@ function sendChunk(webSocket, state, chunk) {
 	const bytes = toBytes(chunk);
 	if (!bytes) return false;
 
+	state.candidateCommitted = true;
 	if (state.responseHeader) {
 		const combined = new Uint8Array(
 			state.responseHeader.byteLength + bytes.byteLength
@@ -92,6 +123,7 @@ function sendChunk(webSocket, state, chunk) {
 	} else {
 		webSocket.send(bytes);
 	}
+	state.forwardedBytes += bytes.byteLength;
 	return true;
 }
 
@@ -103,7 +135,17 @@ async function pumpRemote(socket, webSocket, state) {
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				if (!sendChunk(webSocket, state, value)) break;
+				let sent;
+				try {
+					sent = sendChunk(webSocket, state, value);
+				} catch {
+					terminate(state, webSocket, 1011);
+					break;
+				}
+				if (!sent) {
+					terminate(state, webSocket, 1011);
+					break;
+				}
 				receivedData = true;
 			}
 		} finally {
@@ -115,97 +157,139 @@ async function pumpRemote(socket, webSocket, state) {
 	return receivedData;
 }
 
-async function connectProxySequence(connect, webSocket, state) {
-	for (const endpoint of state.config.proxyPool) {
-		if (state.closed) return false;
-		const socket = await openSocket(
-			connect,
-			endpoint,
-			state.initialData,
-			state.config.proxyTimeout
-		);
-		if (!socket) continue;
-		state.socket = socket;
-		const receivedData = await pumpRemote(socket, webSocket, state);
-		closeTcp(socket);
-		if (receivedData) return true;
+function enqueuePending(state, bytes) {
+	if (
+		bytes.byteLength > MAX_PENDING_OUTBOUND_BYTES - state.pendingBytes
+	) {
+		return false;
 	}
-	return false;
+	if (bytes.byteLength > 0) {
+		state.pendingChunks.push(bytes.slice());
+		state.pendingBytes += bytes.byteLength;
+	}
+	return true;
+}
+
+async function drainPending(socket, webSocket, state) {
+	while (
+		!state.closed &&
+		state.socket === socket &&
+		state.pendingChunks.length > 0
+	) {
+		const bytes = state.pendingChunks[0];
+		// A write can partially reach the peer before rejecting, so the candidate
+		// is committed before the first write attempt rather than after it.
+		state.candidateCommitted = true;
+		try {
+			await writeToSocket(socket, bytes);
+		} catch {
+			terminate(state, webSocket, 1011);
+			return;
+		}
+		if (state.closed || state.socket !== socket) return;
+		state.pendingChunks.shift();
+		state.pendingBytes -= bytes.byteLength;
+		state.forwardedBytes += bytes.byteLength;
+	}
+}
+
+function scheduleDrain(webSocket, state) {
+	if (
+		state.closed ||
+		!state.socket ||
+		state.drainRunning ||
+		state.pendingChunks.length === 0
+	) {
+		return;
+	}
+	const socket = state.socket;
+	state.drainRunning = true;
+	state.drainPromise = drainPending(socket, webSocket, state).finally(() => {
+		state.drainRunning = false;
+		if (
+			!state.closed &&
+			state.socket === socket &&
+			state.pendingChunks.length > 0
+		) {
+			scheduleDrain(webSocket, state);
+		}
+	});
+}
+
+async function waitForDrain(socket, state) {
+	while (!state.closed && state.socket === socket && state.drainRunning) {
+		const current = state.drainPromise;
+		await current;
+		if (state.drainPromise === current && !state.drainRunning) return;
+	}
+}
+
+function candidateEndpoints(config, target) {
+	const direct = { hostname: target.address, port: target.port };
+	const endpoints = [direct, ...config.proxyPool];
+	if (config.proxyFallback && config.proxyPool.length > 0) {
+		endpoints.push(direct);
+	}
+	return endpoints;
 }
 
 async function runOutbound(connect, webSocket, state, target) {
-	const directEndpoint = { hostname: target.address, port: target.port };
-	let direct = await openSocket(
-		connect,
-		directEndpoint,
-		state.initialData,
-		state.config.proxyTimeout
-	);
-	let receivedData = false;
-
-	if (direct) {
-		state.socket = direct;
-		receivedData = await pumpRemote(direct, webSocket, state);
-		closeTcp(direct);
-		if (receivedData || state.closed) {
-			closeWebSocket(webSocket);
-			return;
-		}
-	}
-
-	if (state.config.proxyPool.length > 0) {
-		receivedData = await connectProxySequence(connect, webSocket, state);
-		if (receivedData || state.closed) {
-			closeWebSocket(webSocket);
-			return;
-		}
-	}
-
-	if (state.config.proxyFallback && state.config.proxyPool.length > 0) {
-		direct = await openSocket(
+	for (const endpoint of candidateEndpoints(state.config, target)) {
+		if (state.closed || state.candidateCommitted) break;
+		const socket = await openSocket(
 			connect,
-			directEndpoint,
-			state.initialData,
-			state.config.proxyTimeout
+			endpoint,
+			state.config.proxyTimeout,
+			state
 		);
-		if (direct) {
-			state.socket = direct;
-			await pumpRemote(direct, webSocket, state);
-			closeTcp(direct);
+		if (!socket) continue;
+
+		state.socket = socket;
+		scheduleDrain(webSocket, state);
+		await pumpRemote(socket, webSocket, state);
+		await waitForDrain(socket, state);
+		if (state.socket === socket) state.socket = null;
+		closeTcp(socket);
+
+		if (state.closed) return;
+		if (state.candidateCommitted) {
+			terminate(state, webSocket, 1000);
+			return;
 		}
 	}
-	closeWebSocket(webSocket);
+	terminate(state, webSocket, 1011);
 }
 
 async function handleClientChunk(chunk, connect, webSocket, state) {
 	const bytes = toBytes(chunk);
 	if (!bytes || bytes.byteLength === 0 || state.closed) {
-		closeWebSocket(webSocket);
+		terminate(state, webSocket, 1008);
 		return;
 	}
 
 	if (!state.headerAccepted) {
 		const parsed = parseVlessHeader(bytes, state.config.userID);
 		if (!parsed.ok) {
-			closeWebSocket(webSocket);
+			terminate(state, webSocket, 1008);
 			return;
 		}
 		state.headerAccepted = true;
-		state.initialData = parsed.value.initialData;
 		state.responseHeader = parsed.value.responseHeader;
-		void runOutbound(connect, webSocket, state, parsed.value);
+		if (!enqueuePending(state, parsed.value.initialData)) {
+			terminate(state, webSocket, 1009);
+			return;
+		}
+		void runOutbound(connect, webSocket, state, parsed.value).catch(() =>
+			terminate(state, webSocket, 1011)
+		);
 		return;
 	}
 
-	if (!state.socket) {
-		closeWebSocket(webSocket);
+	if (!enqueuePending(state, bytes)) {
+		terminate(state, webSocket, 1009);
 		return;
 	}
-	try {
-		await writeToSocket(state.socket, bytes);
-	} catch {
-		closeWebSocket(webSocket);
-	}
+	scheduleDrain(webSocket, state);
 }
 
 export function upgradeVlessWebSocket(request, config, connect) {
@@ -216,8 +300,14 @@ export function upgradeVlessWebSocket(request, config, connect) {
 	const state = {
 		closed: false,
 		config,
+		candidateCommitted: false,
+		drainPromise: null,
+		drainRunning: false,
+		forwardedBytes: 0,
 		headerAccepted: false,
-		initialData: new Uint8Array(),
+		openingSocket: null,
+		pendingBytes: 0,
+		pendingChunks: [],
 		responseHeader: null,
 		socket: null,
 	};
@@ -230,12 +320,12 @@ export function upgradeVlessWebSocket(request, config, connect) {
 	});
 	server.addEventListener('close', () => {
 		state.closed = true;
+		clearPending(state);
+		closeTcp(state.openingSocket);
 		closeTcp(state.socket);
 	});
 	server.addEventListener('error', () => {
-		state.closed = true;
-		closeTcp(state.socket);
-		closeWebSocket(server);
+		terminate(state, server, 1011);
 	});
 
 	const earlyData = decodeEarlyData(

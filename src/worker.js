@@ -22,6 +22,14 @@ export async function handleRequest(request, env, connect) {
 	} catch {
 		return plainResponse(404);
 	}
+	if (
+		url.protocol !== 'https:' ||
+		url.username !== '' ||
+		url.password !== '' ||
+		(url.port !== '' && url.port !== '443')
+	) {
+		return plainResponse(404);
+	}
 
 	const requestHost = normalizeHost(request.headers.get('host'));
 	if (

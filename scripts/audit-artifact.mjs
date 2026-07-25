@@ -13,8 +13,14 @@ const artifact = await readFile(artifactPath, 'utf8');
 const prohibited = [
 	['embedded UUID', /[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i],
 	['external URL', /https?:\/\//i],
+	['source map metadata', /sourceMappingURL|sourcesContent/i],
 	['dynamic code evaluation', /\beval\s*\(|\bnew\s+Function\s*\(/],
 	['console logging', /\bconsole\s*\./],
+	['embedded proxy endpoint', /\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b/],
+	[
+		'dynamic HTTP client',
+		/\b(?:globalThis|self|window)\s*\.\s*fetch\s*\(|\bXMLHttpRequest\b/,
+	],
 	['obfuscator marker', /\bjavascript-obfuscator\b|(?:^|[^a-z0-9])_0x[0-9a-f]+/i],
 	['retired public route', /\/(?:sub|trojan|bestip)\/|["'`]\/cf["'`]/i],
 	['retired proxy mode', /\bSOCKS5\b|\bHTTP CONNECT\b|\bVLESS_OUTBOUND\b/i],

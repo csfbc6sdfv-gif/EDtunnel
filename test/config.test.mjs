@@ -51,5 +51,10 @@ test('proxy pool rejects URLs, private, reserved, and Cloudflare addresses', () 
 test('host normalization is exact and port-aware', () => {
 	assert.equal(normalizeHost('EDGE.SONG0810.XYZ'), 'edge.song0810.xyz');
 	assert.equal(normalizeHost('edge.song0810.xyz:443'), 'edge.song0810.xyz');
+	assert.equal(normalizeHost('edge.song0810.xyz:80'), '');
+	assert.equal(normalizeHost('edge.song0810.xyz:8443'), '');
+	assert.equal(normalizeHost('edge.song0810.xyz:0443'), '');
+	assert.equal(normalizeHost('edge.song0810.xyz:not-a-port'), '');
+	assert.equal(normalizeHost('edge.song0810.xyz:443:443'), '');
 	assert.equal(normalizeHost('[::1]:443'), '');
 });

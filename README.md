@@ -22,7 +22,7 @@ automatic upstream synchronization.
 
 ## Reproducible build
 
-Use Node.js 20 or newer:
+Use exactly Node.js 22.16.0, as pinned in `.node-version`:
 
 ```sh
 npm ci
@@ -65,8 +65,25 @@ URLs. A missing or invalid required value returns HTTP 503.
   configuration.
 - The exact secret WebSocket path accepts upgrades.
 - Every other ordinary HTTP route returns 404.
+- The entry request must use HTTPS. Its authority may omit the port or specify
+  literal `:443`; every other explicit port is rejected.
 - The client contract is VLESS + WebSocket + TLS on port 443, with UDP
   disabled. The TLS SNI and HTTP Host must remain the deployment hostname.
+
+## Outbound buffering and retry boundary
+
+While an outbound socket is opening, client payload frames are copied into a
+FIFO buffer capped at 65,536 bytes. The buffer is drained in frame order after
+the socket opens. Exceeding the cap closes the WebSocket with code 1009 and
+closes any opening or active TCP socket.
+
+A candidate connection may be replaced only before any byte has been
+forwarded in either direction. The first outbound write attempt commits the
+candidate because a rejected write may already have partially reached the
+peer. After commitment, a write or transport failure closes the session
+without replaying buffered data to another destination. Policy/input failures
+close with code 1008, transport failures close with 1011, and a committed
+connection ending cleanly closes with 1000.
 
 ## Promotion gate
 

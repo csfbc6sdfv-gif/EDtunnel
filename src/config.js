@@ -24,13 +24,11 @@ export function normalizeHost(value) {
 	if (typeof value !== 'string') return '';
 	const host = value.trim().toLowerCase();
 	if (!host || host.startsWith('[')) return '';
-	const colon = host.lastIndexOf(':');
-	if (colon > -1) {
-		const port = host.slice(colon + 1);
-		if (!/^\d+$/.test(port)) return '';
-		return host.slice(0, colon);
-	}
-	return host;
+	const colon = host.indexOf(':');
+	if (colon === -1) return host;
+	if (host.indexOf(':', colon + 1) !== -1) return '';
+	if (host.slice(colon + 1) !== '443') return '';
+	return host.slice(0, colon);
 }
 
 function parseAllowedHosts(value) {

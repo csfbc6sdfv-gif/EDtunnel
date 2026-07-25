@@ -47,7 +47,7 @@ test('accepts authenticated TCP for a public target', () => {
 	assert.deepEqual([...parsed.value.initialData], [1, 2, 3]);
 });
 
-test('wrong identity and UDP are rejected', () => {
+test('wrong UUID and UDP are rejected', () => {
 	const wrong = ['33333333', '3333', '4333', '8333', '333333333333'].join('-');
 	assert.equal(
 		parseVlessHeader(packet({ address: 'example.com', addressType: 2 }), wrong).code,
@@ -63,13 +63,24 @@ test('wrong identity and UDP are rejected', () => {
 });
 
 test('private, link-local, metadata, and documentation targets are rejected', () => {
-	for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '192.0.2.10']) {
+	for (const address of [
+		'127.0.0.1',
+		'10.0.0.1',
+		'169.254.169.254',
+		'192.0.2.10',
+	]) {
 		assert.equal(
 			parseVlessHeader(packet({ address, addressType: 1 }), TEST_UUID).code,
 			'target_not_allowed'
 		);
 	}
-	for (const address of ['localhost', 'metadata.google.internal', 'host.local']) {
+	for (const address of [
+		'localhost',
+		'metadata',
+		'metadata.aws.internal',
+		'metadata.google.internal',
+		'host.local',
+	]) {
 		assert.equal(
 			parseVlessHeader(packet({ address, addressType: 2 }), TEST_UUID).code,
 			'target_not_allowed'
