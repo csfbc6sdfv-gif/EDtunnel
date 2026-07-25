@@ -1,0 +1,7 @@
+This project is derived from EDtunnel by 3Kmfi6HP under the MIT License.
+
+Upstream repository: https://github.com/6Kmfi6HP/EDtunnel
+Audited source point: 36a19bcfc73f934b69f4b5efec187da1f537d096
+
+The production branch is a security-reduced modification. The original
+copyright and MIT license are retained in LICENSE.
