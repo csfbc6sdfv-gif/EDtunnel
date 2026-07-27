@@ -44,6 +44,15 @@ function toBytes(value) {
 	return null;
 }
 
+async function toInboundBytes(value) {
+	const bytes = toBytes(value);
+	if (bytes) return bytes;
+	if (typeof Blob !== 'undefined' && value instanceof Blob) {
+		return new Uint8Array(await value.arrayBuffer());
+	}
+	return null;
+}
+
 function decodeEarlyData(header) {
 	if (!header) return null;
 	const token = header.split(',')[0].trim();
@@ -261,7 +270,7 @@ async function runOutbound(connect, webSocket, state, target) {
 }
 
 async function handleClientChunk(chunk, connect, webSocket, state) {
-	const bytes = toBytes(chunk);
+	const bytes = await toInboundBytes(chunk);
 	if (!bytes || bytes.byteLength === 0 || state.closed) {
 		terminate(state, webSocket, 1008);
 		return;
@@ -295,6 +304,7 @@ async function handleClientChunk(chunk, connect, webSocket, state) {
 export function upgradeVlessWebSocket(request, config, connect) {
 	const pair = new WebSocketPair();
 	const [client, server] = Object.values(pair);
+	server.binaryType = 'arraybuffer';
 	server.accept();
 
 	const state = {

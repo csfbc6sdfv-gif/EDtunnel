@@ -108,13 +108,17 @@ function fakeSocket({
 
 class FakeWebSocket {
 	constructor() {
+		this.acceptBinaryType = null;
+		this.binaryType = 'blob';
 		this.closeCalls = [];
 		this.listeners = new Map();
 		this.readyState = 1;
 		this.sent = [];
 	}
 
-	accept() {}
+	accept() {
+		this.acceptBinaryType = this.binaryType;
+	}
 
 	addEventListener(type, listener) {
 		const listeners = this.listeners.get(type) || [];
@@ -221,6 +225,30 @@ test('delayed socket buffers multiple frames and drains them in order', async ()
 	assert.deepEqual(
 		socket.writes.map((chunk) => [...chunk]),
 		[[1, 2], [3], [4, 5]]
+	);
+	assert.equal(server.closeCalls.length, 0);
+	server.emit('close', {});
+});
+
+test('server requests arraybuffer delivery before accepting the WebSocket', () => {
+	const socket = fakeSocket();
+	const server = start(() => socket);
+
+	assert.equal(server.acceptBinaryType, 'arraybuffer');
+	server.emit('close', {});
+});
+
+test('Blob client frames are accepted and forwarded in order', async () => {
+	const socket = fakeSocket();
+	const server = start(() => socket);
+
+	server.message(new Blob([packet([1, 2])]));
+	server.message(new Blob([Uint8Array.from([3, 4])]));
+	await waitUntil(() => socket.writes.length === 2, 'Blob frames did not drain');
+
+	assert.deepEqual(
+		socket.writes.map((chunk) => [...chunk]),
+		[[1, 2], [3, 4]]
 	);
 	assert.equal(server.closeCalls.length, 0);
 	server.emit('close', {});
